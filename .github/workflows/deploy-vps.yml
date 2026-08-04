@@ -1,0 +1,96 @@
+name: Deploy wedding invitation to VPS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out site
+        uses: actions/checkout@v4
+
+      - name: Install SSH helper
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y sshpass
+
+      - name: Package site
+        run: tar -czf site.tgz index.html assets
+
+      - name: Upload site
+        env:
+          SSHPASS: ${{ secrets.VPS_PASSWORD }}
+        run: sshpass -e scp -o StrictHostKeyChecking=no site.tgz root@103.124.104.12:/tmp/wedding-site.tgz
+
+      - name: Configure web server
+        env:
+          SSHPASS: ${{ secrets.VPS_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=no root@103.124.104.12 'bash -s' <<'REMOTE'
+          set -e
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y nginx
+          elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y nginx
+          elif command -v yum >/dev/null 2>&1; then
+            yum install -y nginx
+          fi
+
+          install -d -m 755 /var/www/wedding-site/wedding-invitation
+          tar -xzf /tmp/wedding-site.tgz -C /var/www/wedding-site/wedding-invitation
+          find /var/www/wedding-site -type d -exec chmod 755 {} +
+          find /var/www/wedding-site -type f -exec chmod 644 {} +
+
+          if [ -d /etc/nginx/sites-enabled ]; then
+            rm -f /etc/nginx/sites-enabled/default
+            cat > /etc/nginx/sites-available/wedding-invitation <<'NGINX'
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              server_name _;
+              root /var/www/wedding-site;
+
+              location = / { return 302 /wedding-invitation/; }
+              location /wedding-invitation/ {
+                  try_files $uri $uri/ /wedding-invitation/index.html;
+              }
+              location ~* \.(?:css|js|woff2|png|jpg|jpeg|gif|webp|svg)$ {
+                  expires 30d;
+                  add_header Cache-Control "public, immutable";
+                  try_files $uri =404;
+              }
+          }
+          NGINX
+            ln -sfn /etc/nginx/sites-available/wedding-invitation /etc/nginx/sites-enabled/wedding-invitation
+          else
+            if [ -f /etc/nginx/conf.d/default.conf ]; then
+              cp -n /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.pre-wedding || true
+              rm -f /etc/nginx/conf.d/default.conf
+            fi
+            cat > /etc/nginx/conf.d/wedding-invitation.conf <<'NGINX'
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              server_name _;
+              root /var/www/wedding-site;
+
+              location = / { return 302 /wedding-invitation/; }
+              location /wedding-invitation/ {
+                  try_files $uri $uri/ /wedding-invitation/index.html;
+              }
+              location ~* \.(?:css|js|woff2|png|jpg|jpeg|gif|webp|svg)$ {
+                  expires 30d;
+                  add_header Cache-Control "public, immutable";
+                  try_files $uri =404;
+              }
+          }
+          NGINX
+          fi
+
+          nginx -t
+          systemctl enable --now nginx
+          systemctl reload nginx
+          rm -f /tmp/wedding-site.tgz
+          REMOTE
