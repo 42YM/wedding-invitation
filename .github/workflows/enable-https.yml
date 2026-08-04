@@ -1,0 +1,50 @@
+name: Enable HTTPS on VPS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  enable-https:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install SSH helper
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y sshpass
+
+      - name: Configure certificate
+        env:
+          SSHPASS: ${{ secrets.VPS_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=no root@103.124.104.12 'bash -s' <<'REMOTE'
+          set -e
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y certbot python3-certbot-nginx
+          elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y certbot python3-certbot-nginx
+          elif command -v yum >/dev/null 2>&1; then
+            yum install -y epel-release || true
+            yum install -y certbot python3-certbot-nginx
+          fi
+
+          for config in /etc/nginx/sites-available/wedding-invitation /etc/nginx/conf.d/wedding-invitation.conf; do
+            if [ -f "$config" ]; then
+              sed -i 's/server_name _;/server_name 103-124-104-12.sslip.io;/' "$config"
+            fi
+          done
+          nginx -t
+          systemctl reload nginx
+
+          certbot --nginx -d 103-124-104-12.sslip.io --non-interactive --agree-tos --register-unsafely-without-email --redirect
+
+          if command -v ufw >/dev/null 2>&1 && ufw status | grep -q active; then
+            ufw allow 443/tcp
+          fi
+          if command -v firewall-cmd >/dev/null 2>&1; then
+            firewall-cmd --permanent --add-service=https || true
+            firewall-cmd --reload || true
+          fi
+          nginx -t
+          systemctl reload nginx
+          REMOTE
